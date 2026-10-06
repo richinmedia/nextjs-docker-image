@@ -1,9 +1,15 @@
-version: "3"
 services:
   web-app:
     build:
       context: .
+      args:
+        PORT: ${PORT:-3000}
     ports:
-      - "3000:3000"
+      - "${PORT:-3000}:${PORT:-3000}"
     environment:
-      - PORT=3000
+      - PORT=${PORT:-3000}
+    restart: unless-stopped
+    # The image already defines a HEALTHCHECK; `docker compose ps` reports it.
+    # Uncomment to load runtime configuration from a file (never COPY it in):
+    # env_file:
+    #   - .env.production

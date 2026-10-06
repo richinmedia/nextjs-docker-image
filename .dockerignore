@@ -1,13 +1,55 @@
-Dockerfile
-docker-compose.yml
-.dockerignore
-node_modules
-npm-debug.log
-README.md
-.next
+# Version control
 .git
-.env
-.vscode
-.DS_Store
-.github
 .gitignore
+.gitattributes
+.github
+
+# Dependencies ("**/" so nested workspace installs are excluded too)
+**/node_modules
+.pnp
+.pnp.js
+.yarn/cache
+.yarn/install-state.gz
+
+# Build output
+.next
+out
+build
+dist
+.turbo
+.vercel
+
+# Tests and coverage
+coverage
+.nyc_output
+
+# Secrets - must never be baked into an image
+.env
+.env.*
+*.pem
+*.key
+!.env.example
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Editor and OS cruft
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# Logs and caches
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.eslintcache
+.husky
+
+# Docs
+README.md
+LICENSE
+docs

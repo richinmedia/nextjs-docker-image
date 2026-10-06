@@ -1,0 +1,104 @@
+# syntax=docker.io/docker/dockerfile:1
+#
+# AWS Lambda container image.
+#
+# Lambda cannot run a plain HTTP server: a container image must speak the Lambda
+# Runtime API. The AWS Lambda Web Adapter is an internal extension that bridges
+# the two, so the same `node server.js` process works unchanged.
+# https://github.com/awslabs/aws-lambda-web-adapter
+#
+# Differences from ./Dockerfile, and why they cannot live in one image:
+#   - ships the Web Adapter extension (dead weight on every other platform)
+#   - must be single-architecture: Lambda does not accept manifest lists
+#   - the filesystem is read-only except /tmp, so Next's cache is redirected
+#   - no EXPOSE / HEALTHCHECK / init: Lambda manages the lifecycle itself
+#
+#   docker buildx build -f Dockerfile.lambda --platform linux/arm64 --provenance=false -t <ecr-repo>:latest --load .
+
+# Pin by digest for reproducible builds, e.g.
+#   --build-arg NODE_VERSION=22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+ARG NODE_VERSION=22-alpine
+ARG LWA_VERSION=0.9.1
+# The adapter listens on Lambda's port and proxies to the app on this one.
+ARG PORT=3000
+
+FROM node:${NODE_VERSION} AS base
+
+# A named stage, because --from does not accept variable expansion.
+FROM public.ecr.aws/awsguru/aws-lambda-adapter:${LWA_VERSION} AS lambda-adapter
+
+# ---------------------------------------------------------------------------
+# Install dependencies only when needed
+# ---------------------------------------------------------------------------
+FROM base AS deps
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+COPY package.json yarn.lock* package-lock.json* pnpm-lock.yaml* ./
+
+RUN if [ -f yarn.lock ]; then \
+      yarn install --frozen-lockfile; \
+    elif [ -f package-lock.json ]; then \
+      npm ci; \
+    elif [ -f pnpm-lock.yaml ]; then \
+      corepack enable pnpm && pnpm install --frozen-lockfile; \
+    else \
+      echo "No lockfile found. Commit a yarn.lock, package-lock.json or pnpm-lock.yaml." >&2; \
+      exit 1; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Rebuild the source code only when needed
+# ---------------------------------------------------------------------------
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+ENV NEXT_TELEMETRY_DISABLED=1
+
+RUN --mount=type=cache,target=/app/.next/cache \
+    if [ -f yarn.lock ]; then \
+      yarn build; \
+    elif [ -f package-lock.json ]; then \
+      npm run build; \
+    elif [ -f pnpm-lock.yaml ]; then \
+      corepack enable pnpm && pnpm build; \
+    else \
+      echo "No lockfile found. Commit a yarn.lock, package-lock.json or pnpm-lock.yaml." >&2; \
+      exit 1; \
+    fi
+
+RUN mkdir -p /app/public
+
+# ---------------------------------------------------------------------------
+# Lambda runtime image
+# ---------------------------------------------------------------------------
+FROM base AS runner
+ARG PORT
+WORKDIR /app
+
+RUN apk add --no-cache libc6-compat \
+    && addgroup --system --gid 1001 nodejs \
+    && adduser --system --uid 1001 nextjs
+
+# The Web Adapter runs as an internal Lambda extension.
+COPY --from=lambda-adapter /lambda-adapter /opt/extensions/lambda-adapter
+
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=${PORT} \
+    HOSTNAME=0.0.0.0 \
+    AWS_LWA_PORT=${PORT} \
+    AWS_LWA_READINESS_CHECK_PATH=/
+
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+# Only /tmp is writable on Lambda; ISR and the image optimiser write to .next/cache.
+RUN rm -rf /app/.next/cache && ln -s /tmp/next-cache /app/.next/cache
+
+USER nextjs
+
+CMD ["sh", "-c", "mkdir -p /tmp/next-cache && exec node server.js"]
