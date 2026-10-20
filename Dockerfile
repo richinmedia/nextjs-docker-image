@@ -3,9 +3,11 @@
 # Global build args, usable on the FROM lines below. A global ARG must be
 # re-declared inside a stage before that stage can reference it, which is why
 # `runner` repeats `ARG PORT`.
+# Debian (glibc) rather than Alpine (musl), so prebuilt native modules such as
+# sharp load without a compatibility shim.
 # Pin by digest for reproducible builds, e.g.
-#   --build-arg NODE_VERSION=22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
-ARG NODE_VERSION=22-alpine
+#   --build-arg NODE_VERSION=22-bookworm-slim@sha256:<digest>
+ARG NODE_VERSION=22-bookworm-slim
 ARG PORT=3000
 
 FROM node:${NODE_VERSION} AS base
@@ -14,9 +16,6 @@ FROM node:${NODE_VERSION} AS base
 # Install dependencies only when needed
 # ---------------------------------------------------------------------------
 FROM base AS deps
-# Check https://github.com/nodejs/docker-node/tree/main#nodealpine to understand
-# why libc6-compat might be needed.
-RUN apk add --no-cache libc6-compat
 WORKDIR /app
 
 # Globs so a project only needs the lockfile for its own package manager.
@@ -65,16 +64,19 @@ FROM base AS runner
 ARG PORT
 WORKDIR /app
 
-# libc6-compat: sharp (Next.js image optimisation) is a native module.
 # tini: reaps zombies and forwards SIGTERM so container drains are graceful.
-RUN apk add --no-cache libc6-compat tini \
-    && addgroup --system --gid 1001 nodejs \
-    && adduser --system --uid 1001 nextjs
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1001 nodejs \
+    && useradd --system --uid 1001 --gid nodejs --no-create-home --shell /usr/sbin/nologin nextjs
 
+# HEALTHCHECK_PATH: point at a dedicated route (e.g. /api/health) if you have one.
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=${PORT} \
-    HOSTNAME=0.0.0.0
+    HOSTNAME=0.0.0.0 \
+    HEALTHCHECK_PATH=/
 
 COPY --from=builder /app/public ./public
 
@@ -87,12 +89,13 @@ USER nextjs
 
 EXPOSE ${PORT}
 
+# Debian slim ships neither wget nor curl; Node 22's global fetch does the probe.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
-    CMD wget -q --spider "http://127.0.0.1:${PORT}/" || exit 1
+    CMD node -e 'fetch("http://127.0.0.1:" + (process.env.PORT || 3000) + (process.env.HEALTHCHECK_PATH || "/")).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))'
 
 STOPSIGNAL SIGTERM
 
 # server.js is created by next build from the standalone output
 # https://nextjs.org/docs/pages/api-reference/config/next-config-js/output
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "server.js"]

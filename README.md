@@ -52,8 +52,8 @@ docker build --build-arg PORT=8080 -t nextjs-app .
 docker run -e PORT=8080 -p 8080:8080 nextjs-app
 ```
 
-Other build args: `NODE_VERSION` (default `22-alpine`; pass
-`22-alpine@sha256:...` to pin the base image by digest for reproducible builds).
+Other build args: `NODE_VERSION` (default `22-bookworm-slim`; pass
+`22-bookworm-slim@sha256:...` to pin the base image by digest for reproducible builds).
 
 ### Multi-architecture builds
 
@@ -71,8 +71,8 @@ with an exec format error.
 
 | Stage | Does |
 |---|---|
-| `base` | `node:22-alpine`, shared by every other stage |
-| `deps` | Installs `libc6-compat`, detects the package manager, installs dependencies from the lockfile |
+| `base` | `node:22-bookworm-slim` (Debian, glibc), shared by every other stage |
+| `deps` | Detects the package manager, installs dependencies from the lockfile |
 | `builder` | Copies source, runs the build with a BuildKit cache mount on `.next/cache` |
 | `runner` | Minimal production layer: standalone output, non-root user, `tini`, healthcheck |
 
@@ -82,12 +82,14 @@ Runtime characteristics worth knowing before you deploy:
 - **Listens on `0.0.0.0`** via `HOSTNAME`, so platform health probes can reach it.
   A Next.js server left on `localhost` is the most common cause of "container
   failed to start" on managed platforms.
-- **`HEALTHCHECK`** polls `/` with busybox `wget` on the current `$PORT`.
+- **`HEALTHCHECK`** polls `$HEALTHCHECK_PATH` (default `/`) on the current `$PORT`
+  using Node's built-in `fetch`, so no `curl`/`wget` is installed. Set
+  `-e HEALTHCHECK_PATH=/api/health` if your app has a dedicated route.
 - **`tini` as PID 1** with `STOPSIGNAL SIGTERM`, so signals are forwarded and
   zombies reaped. Next.js 15's standalone server handles `SIGTERM` on its own, so
   this is defence in depth rather than a fix for a specific failure.
-- **`sharp` works**, because `libc6-compat` is present in the runtime layer too —
-  Next.js image optimisation is a native module on Alpine.
+- **`sharp` works** out of the box: the Debian base uses glibc, so prebuilt
+  native modules load without Alpine's `libc6-compat` shim.
 
 ---
 
